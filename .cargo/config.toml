@@ -1,0 +1,12 @@
+[registries]
+bluewind = { index = "https://github.com/bluewind-embedded-systems/bw-cargo-index" }
+infineon = { index = "https://github.com/Infineon/aurix-cargo-index"}
+
+[target.tc162-htc-none]
+runner = "tricore-probe"
+# Default dwarf version of v1.0.0 HighTec compiler is version 3 which is
+# incompatible with defmt location information
+rustflags = ["-Z", "dwarf-version=4"]
+
+[build]
+target = "tc162-htc-none"
