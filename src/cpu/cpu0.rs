@@ -1,5 +1,8 @@
 use core::{
-    arch::asm, cell::{Cell, UnsafeCell}, mem::MaybeUninit, sync::atomic::{self, AtomicBool, AtomicU32, Ordering}
+    arch::asm,
+    cell::{Cell, UnsafeCell},
+    mem::MaybeUninit,
+    sync::atomic::{self, AtomicBool, AtomicU32, Ordering},
 };
 
 use crate::{
@@ -50,12 +53,12 @@ impl Cpu for Cpu0 {
 
     fn on_timer_interrupt() {
         let now = TICKS.fetch_add(1, core::sync::atomic::Ordering::SeqCst) as u64;
-        // print!("[debug]: Timer interrupt on core 0, now: {}\n", now);
-        Self::modify_alarm_queue(|x| {
-            // print!("[debug]: CPU0 alarm queue size at {}: {}\n", now, x.queue_size());
-            x.call_all_expired(now);
-            // print!("[debug]: CPU0 alarm queue callback done at {}\n", now);
-        })
+        let r = unsafe {
+            // SAFETY: a core can only call its own `Core` object
+            // and interrupts are disabled, so no preemption
+            &mut *ALARM_QUEUE.as_mut_ptr()
+        };
+        r.call_all_expired(now);
     }
 
     fn spawn(fut: impl core::future::Future<Output = ()> + 'static, name: &'static str) {
@@ -137,17 +140,15 @@ impl Cpu0 {
     fn modify_alarm_queue<R>(
         f: impl FnOnce(&mut AlarmQueue<N_ALARM_HANDLES, N_ALARM_ITEMS>) -> R,
     ) -> R {
-        critical_section::with(|_| {
-            let r = unsafe {
-                // SAFETY: a core can only call its own `Core` object
-                // and interrupts are disabled, so no preemption
-                if !INITIALISED.load(Ordering::SeqCst) {
-                    panic!("ERROR: uninitialised alarm queue");
-                }
-                &mut *ALARM_QUEUE.as_mut_ptr()
-            };
-            f(r)
-        })
+        let r = unsafe {
+            // SAFETY: a core can only call its own `Core` object
+            // and interrupts are disabled, so no preemption
+            if !INITIALISED.load(Ordering::SeqCst) {
+                panic!("ERROR: uninitialised alarm queue");
+            }
+            &mut *ALARM_QUEUE.as_mut_ptr()
+        };
+        f(r)
     }
 }
 
