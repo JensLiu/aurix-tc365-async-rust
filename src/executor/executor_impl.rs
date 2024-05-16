@@ -4,7 +4,7 @@ use core::{
     task::{Context, RawWaker, Waker},
 };
 
-use heapless::Deque;
+use heapless::{Deque, Vec};
 
 use crate::{
     cpu::{alarm::AlarmHandle, cpu0::Cpu0, Cpu},
@@ -48,10 +48,10 @@ impl Executor {
 
     pub unsafe fn enqueue_timer(&self, expires_at: u64, waker: Waker) -> Option<()> {
         let name = unsafe { waker::task_from_waker(&waker).as_static_mut_header() }.name;
-        // print!(
-        //     "[debug]: Executor timer enqueued: task={}, expires_at={}, try to lock the timer queue at {}\n",
-        //     name, expires_at, Cpu0::now()
-        // );
+        print!(
+            "[debug]: Executor timer enqueued: task={}, expires_at={}, try to inset into the timer queue of {}\n",
+            name, expires_at, Cpu0::now()
+        );
         let next_tick = self.timer_queue.lock_mut(|x| {
             // print!(
             //     "[debug]: [debug]: Executor timer enqueued: task={}, expires_at={}, locked the timer queue at {}\n",
@@ -67,13 +67,13 @@ impl Executor {
     pub fn start(&self) -> ! {
         self.register_alarm_callback();
         loop {
-            if !Cpu0::event_fetch_and_clear_local() {
+            if !Cpu0::event_fetch_and_clear_local() { // <- possible lost wakeups????
                 // If events arrive here, it will not be lost
                 // and will be noficed in the next iteration of this buzy loop.
                 continue;
             }
 
-            print!("[debug]: executor woken up\n");
+            // print!("[debug]: executor woken up\n");
             self.check_timer_queue();
             self.advance_runnable_tasks();
             self.renew_alarm();
@@ -82,16 +82,21 @@ impl Executor {
 
     fn check_timer_queue(&self) {
         let now = Cpu0::now();
-        let n_expired = self.timer_queue.lock_mut(|tq| {
+        let mut ready: Vec<&mut TaskHeader, MAX_TASKS> = Vec::new();
+
+        self.timer_queue.lock_mut(|tq| {
             tq.dequeue_expired(now, |item| {
                 let task_ref = unsafe { item.get_task_ref().as_static_mut_header() };
-                // print!("[debug] executor enqueue expired task: {}\n", task_ref.name);
-                self.run_queue
-                    .lock_mut(|rq| rq.push_front(task_ref))
-                    .ok()
-                    .unwrap();
+                ready.push(task_ref).ok().unwrap();
             })
         });
+
+        self.run_queue.lock_mut(|x| {
+            for task in ready {
+                x.push_front(task).ok().unwrap();
+            }
+        });
+
         // print!("[debug] expired tasks at {}: {}\n", now, n_expired);
     }
 
