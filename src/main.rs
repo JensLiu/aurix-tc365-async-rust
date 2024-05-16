@@ -1,22 +1,19 @@
-//! Simple CAN example.
-
 #![no_main]
 #![no_std]
 
 use bw_r_drivers_tc37x as drivers;
 use core::arch::asm;
 use core::time::Duration;
-use cpu::core0::Core0;
+use cpu::cpu0::Cpu0;
 use critical_section::RawRestoreState;
-use drivers::gpio::GpioExt;
 use drivers::scu::wdt::{disable_cpu_watchdog, disable_safety_watchdog};
 use drivers::scu::wdt_call::call_without_endinit;
+use drivers::ssw;
 use drivers::uart::init_uart_io;
 use drivers::uart::print;
-use drivers::{pac, ssw};
-use executor::yields;
 
-use crate::cpu::Core;
+use crate::cpu::Cpu;
+use crate::time::timer_fut::Timer;
 
 mod cpu;
 mod executor;
@@ -29,37 +26,33 @@ mod utils;
 #[export_name = "main"]
 fn main() -> ! {
     init_uart_io();
-    print("Start async executor test\n");
-    time::init();
-    print("Enable interrupts\n");
-    unsafe {
-        asm!("enable");
-    }
 
-    Core0::spawn(async {
-        loop {
-            print("Task A: Hello World!\n");
-            Core0::yields().await;
-        }
-    });
+    Cpu0::init();
 
-    Core0::spawn(async {
-        loop {
-            print("Task B: Hallo Welt\n");
-            Core0::yields().await;
+    Cpu0::spawn(
+        async {
+            loop {
+                print!("Task A: {}\n", Cpu0::now());
+                Timer::after_ticks(5).await;
+            }
+        },
+        "Task A",
+    );
 
-            print("Task B: will yield\n");
-            Core0::yields().await;
+    Cpu0::spawn(
+        async {
+            loop {
+                print!("Task B: {}\n", Cpu0::now());
+                Timer::after_ticks(3).await;
 
-            print("Task B: will yield again\n");
-            Core0::yields().await;
+                print!("Task B: {}\n", Cpu0::now());
+                Timer::after_ticks(3).await;
+            }
+        },
+        "Task B",
+    );
 
-            print("Task B: will yield yet again\n");
-            Core0::yields().await;
-        }
-    });
-
-    Core0::start_executor();
+    Cpu0::start_executor();
 }
 
 /// Wait for a number of cycles roughly calculated from a duration.
@@ -88,11 +81,19 @@ fn pre_init_fn() {
 
 #[export_name = "Crt0PostInit"]
 fn post_init_fn() {
-    if ssw::init_clock().is_err() {
-        panic!("Error in ssw init");
+    // added: park unused CPUs?
+    let cpu_core_id: u32;
+    unsafe {
+        core::arch::asm!("mfcr {0}, 0xFE1C", out(reg32) cpu_core_id);
     }
-
-    load_interrupt_table();
+    if cpu_core_id == 0 {
+        if ssw::init_clock().is_err() {
+            panic!("Error in ssw init");
+        }
+        load_interrupt_table();
+    } else {
+        loop {}
+    }
 }
 
 #[allow(unused_variables)]

@@ -1,127 +1,168 @@
 use core::{
-    cell::UnsafeCell, future::Future, marker::PhantomData, pin::Pin, sync::atomic::{AtomicBool, Ordering}, task::{Context, RawWaker, RawWakerVTable, Waker}
+    future::Future,
+    pin::Pin,
+    task::{Context, RawWaker, Waker},
 };
 
-use bw_r_drivers_tc37x::uart::print;
-use heapless::Vec;
+use heapless::Deque;
 
-use crate::{cpu::Core, memory::alloc::{Alloc, ALLOC}};
-
-// waker context, p is a raw pointer to an atomic bool variable
-static VTABLE: RawWakerVTable = {
-    unsafe fn clone(p: *const ()) -> RawWaker {
-        RawWaker::new(p, &VTABLE)
-    }
-
-    unsafe fn wake(p: *const ()) {
-        wake_by_ref(p);
-    }
-
-    unsafe fn wake_by_ref(p: *const ()) {
-        (*(p as *const AtomicBool)).store(true, Ordering::Release)
-    }
-
-    unsafe fn drop(_: *const ()) {
-        // no-op
-    }
-
-    RawWakerVTable::new(clone, wake, wake_by_ref, drop)
+use crate::{
+    cpu::{alarm::AlarmHandle, cpu0::Cpu0, Cpu},
+    executor::waker,
+    mutex::blocking::{CriticalSectionRawMutex, Mutex},
+    print,
+    time::timer_queue::{TimerQueue, TimerQueueItem},
 };
+
+use super::{task::TaskHeader, waker::VTABLE};
 
 const MAX_TASKS: usize = 32;
 
-type Task = Node<dyn Future<Output = ()> + 'static>;
-
-pub struct Node<F>
-where
-    F: ?Sized,
-{
-    ready: AtomicBool,
-    f: UnsafeCell<F>,
-}
-// UnsafeCell for interior mutability while still allowing it to be static
-
-impl Task {
-    pub fn new(fut: impl Future + 'static) -> &'static mut Self {
-        unsafe {
-            // ALLOC should have already been initialised at this point
-            let alloc = ALLOC.get() as *mut Alloc;
-            (*alloc).alloc_init(Node {
-                ready: AtomicBool::new(true),
-                f: UnsafeCell::new(async {
-                    fut.await;
-                    // `spawn`-ed tasks must never terminate
-                    crate::utils::abort();
-                }),
-            })
-        }
-    }
-}
-
-pub struct Executor<A> {
-    // not using mutex for now
-    // we are only testing on a single core and it will
+pub struct Executor {
+    // not using mutex for now we are only testing on a single core and it will
     // only be mutated in thread mode, hence no preemption
-    tasks: UnsafeCell<Vec<&'static Task, MAX_TASKS>>,
-    _phantom: PhantomData<A>,   // A for arch
+    run_queue: Mutex<CriticalSectionRawMutex, Deque<&'static mut TaskHeader, MAX_TASKS>>,
+    timer_queue: Mutex<CriticalSectionRawMutex, TimerQueue>,
+    alarm_handle: Option<AlarmHandle>,
 }
 
-impl<A: Core> Executor<A> {
-    pub fn new() -> Self {
+impl Executor {
+    pub fn new(alarm_handle: Option<AlarmHandle>) -> Self {
         Self {
-            tasks: UnsafeCell::new(Vec::new()),
-            _phantom: PhantomData,
+            run_queue: Mutex::new(Deque::new()),
+            timer_queue: Mutex::new(TimerQueue::new()),
+            alarm_handle,
         }
     }
 
-    pub fn spawn(&self, f: impl Future + 'static) {
-        let res = unsafe { (*self.tasks.get()).push(Task::new(f)) };
-        if res.is_err() {
+    pub fn spawn(&'static self, f: impl Future + 'static, name: &'static str) {
+        if self
+            .run_queue
+            .lock_mut(|x| x.push_front(TaskHeader::new(f, self, name)))
+            .is_err()
+        {
             // OOM
             crate::utils::abort();
         }
     }
 
+    pub unsafe fn enqueue_timer(&self, expires_at: u64, waker: Waker) -> Option<()> {
+        let name = unsafe { waker::task_from_waker(&waker).as_static_mut_header() }.name;
+        // print!(
+        //     "[debug]: Executor timer enqueued: task={}, expires_at={}, try to lock the timer queue at {}\n",
+        //     name, expires_at, Cpu0::now()
+        // );
+        let next_tick = self.timer_queue.lock_mut(|x| {
+            // print!(
+            //     "[debug]: [debug]: Executor timer enqueued: task={}, expires_at={}, locked the timer queue at {}\n",
+            //     name, expires_at, Cpu0::now()
+            // );
+            x.enqueue(TimerQueueItem { expires_at, waker });
+            x.next_expiration()
+        })?;
+
+        self.set_alarm(next_tick)
+    }
+
     pub fn start(&self) -> ! {
-        let mut some_task_advanced = false;
-        // advance each runnable task
-        let tasks = unsafe { &mut (*self.tasks.get()) };
+        self.register_alarm_callback();
         loop {
-            
-            if !A::event_fetch_and_clear_local() {
+            if !Cpu0::event_fetch_and_clear_local() {
                 // If events arrive here, it will not be lost
                 // and will be noficed in the next iteration of this buzy loop.
                 continue;
             }
 
-            // print("[Debug]: executor woken up\n");
-            for task in tasks.iter() {
-                if task.ready.load(Ordering::SeqCst) {
-                    some_task_advanced = true;
-
-                    // set to suspended because it has been polled
-                    task.ready.store(false, Ordering::Release);
-
-                    let waker = unsafe {
-                        Waker::from_raw(RawWaker::new(
-                            &task.ready as *const _ as *const _, // as argument to the Waker::wake function
-                            &VTABLE,
-                        ))
-                    };
-
-                    let mut cx = Context::from_waker(&waker);
-
-                    let _ = unsafe {
-                        // SAFETY: It points to a static memory location, so it is naturally Pin-ed
-                        let fut = Pin::new_unchecked(&mut *task.f.get());
-                        fut.poll(&mut cx).is_ready()
-                    };
-                }
-            }
-
-            // if some_task_advanced {
-            //     A::signal_event_local();
-            // }
+            print!("[debug]: executor woken up\n");
+            self.check_timer_queue();
+            self.advance_runnable_tasks();
+            self.renew_alarm();
         }
+    }
+
+    fn check_timer_queue(&self) {
+        let now = Cpu0::now();
+        let n_expired = self.timer_queue.lock_mut(|tq| {
+            tq.dequeue_expired(now, |item| {
+                let task_ref = unsafe { item.get_task_ref().as_static_mut_header() };
+                // print!("[debug] executor enqueue expired task: {}\n", task_ref.name);
+                self.run_queue
+                    .lock_mut(|rq| rq.push_front(task_ref))
+                    .ok()
+                    .unwrap();
+            })
+        });
+        // print!("[debug] expired tasks at {}: {}\n", now, n_expired);
+    }
+
+    fn update_timer_queue(&self, task: &'static mut TaskHeader) {
+        if task.expires_at.is_some() {
+            self.timer_queue.lock_mut(|x| {
+                let expires_at = task.expires_at.unwrap();
+                let waker = unsafe {
+                    Waker::from_raw(RawWaker::new(task as *const _ as *const _, &VTABLE))
+                };
+                x.enqueue(TimerQueueItem { waker, expires_at });
+            })
+        }
+    }
+
+    fn renew_alarm(&self) {
+        if let Some(next_tick) = self.timer_queue.lock(|x| x.next_expiration()) {
+            self.set_alarm(next_tick);
+        }
+    }
+
+    // task execution ------------------------------------------------------------------------------------------------------
+
+    fn advance_runnable_tasks(&self) {
+        // set to suspended because it has been polled by `pop`-ing it out of the `ready_queue`
+        while let Some(task_ref) = self.run_queue.lock_mut(|x| x.pop_front()) {
+            // create waker and context for this task on the fly
+            // to pass it to the `Future::poll` chain
+            let waker = unsafe {
+                Waker::from_raw(RawWaker::new(
+                    task_ref as *const TaskHeader as *const (), // as argument to the `Waker::wake` function
+                    &VTABLE,
+                ))
+            };
+            let mut cx = Context::from_waker(&waker);
+
+            // poll the future: one execution of the state machine
+            let _ = unsafe {
+                // SAFETY: It points to a static memory location, so it is naturally Pin-ed
+                let fut = Pin::new_unchecked(&mut *task_ref.fut_ref);
+                fut.poll(&mut cx).is_ready()
+            };
+
+            // some timer might be set while executing, check if it needs enqueuing
+            self.update_timer_queue(task_ref);
+        }
+    }
+
+    // alarm action -----------------------------------------------------------------------------------
+
+    /// The executor registers an alarm. If it expires, the alarm_callback function will be called
+    /// which the context passed being a pointer to itself.
+    pub fn register_alarm_callback(&self) {
+        if self.alarm_handle.is_some() {
+            Cpu0::set_alarm_callback(
+                self.alarm_handle.unwrap(),
+                Self::alarm_callback,
+                self as *const _ as *mut (),
+            );
+        }
+    }
+
+    /// Set the next tick when the alarm will kick off
+    pub fn set_alarm(&self, expires_at: u64) -> Option<()> {
+        Cpu0::set_alarm(self.alarm_handle.unwrap(), expires_at) // set the next tick
+    }
+
+    /// Callback function when the alarm set by set_alarm expires
+    pub fn alarm_callback(ctx_as_self: *mut ()) {
+        let zelf = unsafe { &mut *(ctx_as_self as *mut Self) };
+        // print!("[debug]: timer callback on executor\n");
+        Cpu0::signal_event_local(); // some timer expired, wake up the executor (TODO: generalise this)
     }
 }

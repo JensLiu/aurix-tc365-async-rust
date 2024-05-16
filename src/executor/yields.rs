@@ -1,13 +1,13 @@
 use core::{future::Future, marker::PhantomData, pin, task::Poll};
 
-use crate::cpu::Core;
+use crate::cpu::Cpu;
 
 pub struct Yielder<A> {
     yielded: bool,
     _phantom: PhantomData<A>,
 }
 
-impl<A: Core> Yielder<A> {
+impl<A: Cpu> Yielder<A> {
     pub fn new() -> Self {
         Self {
             yielded: false,
@@ -16,7 +16,7 @@ impl<A: Core> Yielder<A> {
     }
 }
 
-impl<A: Core + core::marker::Unpin> Future for Yielder<A> {
+impl<A: Cpu + core::marker::Unpin> Future for Yielder<A> {
     type Output = ();
 
     fn poll(

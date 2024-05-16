@@ -7,7 +7,7 @@ license = "BSL-1.0"
 [dependencies]
 defmt = "=0.3.6"
 defmt-rtt = "=0.4.0"
-critical-section = { version = "=1.1.2", features = [ "restore-state-bool" ] }
+critical-section = { version = "=1.1.2", features = ["restore-state-bool"] }
 # heapless for statically allocated containers
 heapless = "0.8.0"
 # concate identifiers in macros
@@ -17,4 +17,4 @@ paste = "1.0.15"
 registry = "bluewind"
 path = "../bw-r-drivers-tc37x"
 version = "0.2.0"
-features = [ "log_with_defmt" ]
+features = ["log_with_defmt"]

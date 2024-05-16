@@ -56,4 +56,10 @@ impl<R: RawMutex, T> Mutex<R, T> {
             f(inner)
         })
     }
+
+    pub fn lock_mut<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
+        let ptr = self.data.get() as *mut T;
+        let inner = unsafe { &mut *ptr };
+        f(inner)
+    }
 }
