@@ -8,7 +8,7 @@ use core::{
 use crate::{
     executor::{self, executor_impl::Executor, yields::Yielder},
     memory::alloc::{Alloc, ALLOC},
-    mutex::{self, blocking::CriticalSectionRawMutex},
+    mutex::blocking::{CriticalSectionRawMutex, Mutex},
     print,
 };
 
@@ -18,8 +18,7 @@ use super::{
 };
 
 /// signals between tasks and tasks, ISRs and task ON THE SAME CORE
-static CORE0_LOCAL_EVENT: mutex::blocking::Mutex<CriticalSectionRawMutex, Cell<bool>> =
-    mutex::blocking::Mutex::new(Cell::new(true));
+static CORE0_LOCAL_EVENT: Mutex<CriticalSectionRawMutex, Cell<bool>> = Mutex::new(Cell::new(true));
 
 // TODO: signals across cores, use CAS if possible??
 
@@ -62,11 +61,11 @@ impl Cpu for Cpu0 {
     }
 
     fn spawn(fut: impl core::future::Future<Output = ()> + 'static, name: &'static str) {
-        Self::executor_ref().spawn(fut, name);
+        unsafe { Self::executor_ref() }.spawn(fut, name);
     }
 
     fn start_executor() -> ! {
-        Self::executor_ref().start();
+        unsafe { Self::executor_ref() }.start();
     }
 
     fn yields() -> executor::yields::Yielder<Self>
@@ -110,28 +109,26 @@ impl Cpu for Cpu0 {
         }
     }
 
-    fn executor_ref() -> &'static mut Executor {
+    unsafe fn executor_ref() -> &'static mut Executor {
         static INIT: AtomicBool = AtomicBool::new(false); // initialised or not
         static mut EXECUTOR: UnsafeCell<MaybeUninit<Executor>> =
             UnsafeCell::new(MaybeUninit::uninit());
 
         if INIT.load(Ordering::Relaxed) {
-            unsafe { &mut *(EXECUTOR.get() as *mut Executor) }
+            &mut *(EXECUTOR.get() as *mut Executor)
         } else {
-            unsafe {
-                // reserved memory for the bump allocator
-                static mut MEMORY: [u8; MEMORY_SIZE] = [0; MEMORY_SIZE];
+            // reserved memory for the bump allocator
+            static mut MEMORY: [u8; MEMORY_SIZE] = [0; MEMORY_SIZE];
 
-                let executorp = EXECUTOR.get() as *mut Executor;
-                let alarm_handle = Self::allocate_alarm().unwrap(); // must succeed
-                executorp.write(Executor::new(Some(alarm_handle)));
-                let allocp = ALLOC.get() as *mut Alloc;
-                allocp.write(Alloc::new(&mut MEMORY));
-                // force the `allocp` write to complete before returning from this function
-                atomic::compiler_fence(Ordering::Release);
-                INIT.store(true, Ordering::Relaxed);
-                &mut *executorp
-            }
+            let executorp = EXECUTOR.get() as *mut Executor;
+            let alarm_handle = Self::allocate_alarm().unwrap(); // must succeed
+            executorp.write(Executor::new(Some(alarm_handle)));
+            let allocp = ALLOC.get() as *mut Alloc;
+            allocp.write(Alloc::new(&mut MEMORY));
+            // force the `allocp` write to complete before returning from this function
+            atomic::compiler_fence(Ordering::Release);
+            INIT.store(true, Ordering::Relaxed);
+            &mut *executorp
         }
     }
 }

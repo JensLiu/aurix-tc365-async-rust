@@ -1,7 +1,7 @@
 use core::{
     future::Future,
     pin::Pin,
-    task::{Context, RawWaker, Waker},
+    task::{self, Context, RawWaker, Waker},
 };
 
 use heapless::{Deque, Vec};
@@ -46,28 +46,29 @@ impl Executor {
         }
     }
 
-    pub unsafe fn enqueue_timer(&self, expires_at: u64, waker: Waker) -> Option<()> {
-        let name = unsafe { waker::task_from_waker(&waker).as_static_mut_header() }.name;
-        print!(
-            "[debug]: Executor timer enqueued: task={}, expires_at={}, try to inset into the timer queue of {}\n",
-            name, expires_at, Cpu0::now()
-        );
-        let next_tick = self.timer_queue.lock_mut(|x| {
-            // print!(
-            //     "[debug]: [debug]: Executor timer enqueued: task={}, expires_at={}, locked the timer queue at {}\n",
-            //     name, expires_at, Cpu0::now()
-            // );
-            x.enqueue(TimerQueueItem { expires_at, waker });
-            x.next_expiration()
-        })?;
+    // pub unsafe fn enqueue_timer(&self, expires_at: u64, waker: Waker) -> Option<()> {
+    //     let name = unsafe { waker::task_from_waker(&waker).as_static_mut_header() }.name;
+    //     print!(
+    //         "[debug]: Executor timer enqueued: task={}, expires_at={}, try to inset into the timer queue of {}\n",
+    //         name, expires_at, Cpu0::now()
+    //     );
+    //     let next_tick = self.timer_queue.lock_mut(|x| {
+    //         // print!(
+    //         //     "[debug]: [debug]: Executor timer enqueued: task={}, expires_at={}, locked the timer queue at {}\n",
+    //         //     name, expires_at, Cpu0::now()
+    //         // );
+    //         x.enqueue(TimerQueueItem { expires_at, waker });
+    //         x.next_expiration()
+    //     })?;
 
-        self.set_alarm(next_tick)
-    }
+    //     self.set_alarm(next_tick)
+    // }
 
     pub fn start(&self) -> ! {
         self.register_alarm_callback();
         loop {
-            if !Cpu0::event_fetch_and_clear_local() { // <- possible lost wakeups????
+            if !Cpu0::event_fetch_and_clear_local() {
+                // <- possible lost wakeups????
                 // If events arrive here, it will not be lost
                 // and will be noficed in the next iteration of this buzy loop.
                 continue;
@@ -102,6 +103,11 @@ impl Executor {
 
     fn update_timer_queue(&self, task: &'static mut TaskHeader) {
         if task.expires_at.is_some() {
+            // print!(
+            //     "[debug]: Executor::updpate_timer_queue: task {} timer was set to {}\n",
+            //     task.name,
+            //     task.expires_at.unwrap()
+            // );
             self.timer_queue.lock_mut(|x| {
                 let expires_at = task.expires_at.unwrap();
                 let waker = unsafe {
@@ -114,6 +120,7 @@ impl Executor {
 
     fn renew_alarm(&self) {
         if let Some(next_tick) = self.timer_queue.lock(|x| x.next_expiration()) {
+            // print!("[debug]: Executor::renew_alarm: set to tick at {}\n", next_tick);
             self.set_alarm(next_tick);
         }
     }
@@ -123,6 +130,8 @@ impl Executor {
     fn advance_runnable_tasks(&self) {
         // set to suspended because it has been polled by `pop`-ing it out of the `ready_queue`
         while let Some(task_ref) = self.run_queue.lock_mut(|x| x.pop_front()) {
+            task_ref.expires_at = None; // clear its expiration bit because it has already been woken
+            
             // create waker and context for this task on the fly
             // to pass it to the `Future::poll` chain
             let waker = unsafe {

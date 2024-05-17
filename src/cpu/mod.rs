@@ -25,7 +25,7 @@ pub trait Cpu {
 
     fn on_timer_interrupt();
 
-    fn executor_ref() -> &'static mut Executor
+    unsafe fn executor_ref() -> &'static mut Executor
     where
         Self: Sized;
 

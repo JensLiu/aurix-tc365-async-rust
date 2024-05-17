@@ -28,17 +28,15 @@ impl Future for Timer {
             Poll::Ready(())
         } else {
             // schedule wake up
-            let header = unsafe {
+            unsafe {
                 // SAFETY: when the executor calls poll on this future, its top-level furure, i.e. TaskHeader
                 // has already been popped from the run_queue
-                waker::task_from_waker(cx.waker()).as_static_mut_header()
-            };
-
-            unsafe {
-                header
-                    .executor
-                    .unwrap()
-                    .enqueue_timer(self.expires_at, cx.waker().clone());
+                let header = waker::task_from_waker(cx.waker()).as_static_mut_header();
+                header.expires_at = Some(self.expires_at);
+                // header
+                //     .executor
+                //     .unwrap()
+                //     .enqueue_timer(self.expires_at, cx.waker().clone());
             }
             Poll::Pending
         }
