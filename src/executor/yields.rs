@@ -33,9 +33,6 @@ impl<A: Cpu + core::marker::Unpin> Future for Yielder<A> {
             // wake itself, it will be immidiately scheduled to run the next time
             cx.waker().wake_by_ref();
 
-            // wake up the CPU
-            A::signal_event_local();
-
             Poll::Pending
         }
     }

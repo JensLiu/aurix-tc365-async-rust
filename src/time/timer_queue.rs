@@ -126,7 +126,7 @@ impl TimerQueue {
         let mut x: usize = 0;
         loop {
             if let Some(item) = self.queue.peek() {
-                let task = unsafe { waker::task_from_waker(&item.waker).as_static_mut_header() };
+                // let task = unsafe { waker::task_from_waker(&item.waker).as_static_mut_header() };
                 // print!(
                 //     "\ttimer queue: task={}, expires_at={}, now={}\n",
                 //     task.name, item.expires_at, now

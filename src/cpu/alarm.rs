@@ -1,6 +1,6 @@
 use heapless::{binary_heap, BinaryHeap, Vec};
 
-use crate::mutex::blocking::{CriticalSectionRawMutex, Mutex};
+use crate::sync::blocking_mutex::{CriticalSectionRawMutex, Mutex};
 
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]

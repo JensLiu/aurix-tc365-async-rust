@@ -1,4 +1,7 @@
-use core::{mem, task::{RawWaker, RawWakerVTable, Waker}};
+use core::{
+    mem,
+    task::{RawWaker, RawWakerVTable, Waker},
+};
 
 use crate::executor::task::{TaskHeader, TaskRef};
 
@@ -13,7 +16,8 @@ pub(crate) static VTABLE: RawWakerVTable = {
     }
 
     unsafe fn wake_by_ref(p: *const ()) {
-        let task = TaskRef::from_ptr(p as *const TaskHeader);
+        let task = TaskRef::from_ptr(p as *const TaskHeader).as_static_mut_header();
+        task.executor.enqueue_and_pend(task);
     }
 
     unsafe fn drop(_: *const ()) {
@@ -42,5 +46,3 @@ pub fn task_from_waker(waker: &Waker) -> TaskRef {
     // safety: our wakers are always created with `TaskRef::as_ptr`
     unsafe { TaskRef::from_ptr(hack.data as *const TaskHeader) }
 }
-
-

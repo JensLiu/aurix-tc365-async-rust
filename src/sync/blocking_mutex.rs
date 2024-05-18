@@ -63,3 +63,39 @@ impl<R: RawMutex, T> Mutex<R, T> {
         f(inner)
     }
 }
+
+impl<R, T> Mutex<R, T> {
+    /// Creates a new mutex based on a pre-existing raw mutex.
+    ///
+    /// This allows creating a mutex in a constant context on stable Rust.
+    #[inline]
+    pub const fn const_new(raw_mutex: R, val: T) -> Mutex<R, T> {
+        Mutex {
+            raw: raw_mutex,
+            data: UnsafeCell::new(val),
+        }
+    }
+
+    /// Consumes this mutex, returning the underlying data.
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.data.into_inner()
+    }
+
+    /// Returns a mutable reference to the underlying data.
+    ///
+    /// Since this call borrows the `Mutex` mutably, no actual locking needs to
+    /// take place---the mutable borrow statically guarantees no locks exist.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.data.get() }
+    }
+}
+
+impl<T> Mutex<CriticalSectionRawMutex, T> {
+    /// Borrows the data for the duration of the critical section
+    pub fn borrow<'cs>(&'cs self, _cs: critical_section::CriticalSection<'cs>) -> &'cs T {
+        let ptr = self.data.get() as *const T;
+        unsafe { &*ptr }
+    }
+}

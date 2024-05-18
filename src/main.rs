@@ -6,11 +6,15 @@ use core::arch::asm;
 use core::time::Duration;
 use cpu::cpu0::Cpu0;
 use critical_section::RawRestoreState;
+use drivers::gpio::GpioExt;
 use drivers::scu::wdt::{disable_cpu_watchdog, disable_safety_watchdog};
 use drivers::scu::wdt_call::call_without_endinit;
-use drivers::ssw;
 use drivers::uart::init_uart_io;
 use drivers::uart::print;
+use drivers::{pac, ssw};
+use sync::blocking_mutex::CriticalSectionRawMutex;
+use sync::mutex::Mutex;
+use sync::pipe::Pipe;
 
 use crate::cpu::Cpu;
 use crate::time::timer_fut::Timer;
@@ -18,10 +22,13 @@ use crate::time::timer_fut::Timer;
 mod cpu;
 mod executor;
 mod memory;
-mod mutex;
 mod runtime;
+mod sync;
 mod time;
 mod utils;
+
+const PIPE_BUF_SIZE: usize = 32;
+static DATAPIPE: Pipe<CriticalSectionRawMutex, PIPE_BUF_SIZE> = Pipe::new();
 
 #[export_name = "main"]
 fn main() -> ! {
@@ -29,27 +36,78 @@ fn main() -> ! {
 
     Cpu0::init();
 
+    let gpio00 = pac::P00.split();
+    let mut led1 = gpio00.p00_5.into_push_pull_output();
+    let mut led2 = gpio00.p00_6.into_push_pull_output();
+
     Cpu0::spawn(
         async {
+            let random_words = ["apple", "mountain", "river", "elephant", "galaxy"];
             loop {
-                print!("Task A: {}\n", Cpu0::now());
-                Timer::after_ticks(5).await;
+                let now = Cpu0::now();
+                let idx = now as usize % random_words.len();
+                let word = random_words[idx];
+                let mut buf = [0u8; PIPE_BUF_SIZE];
+                let s =
+                    format_no_std::show(&mut buf, format_args!("From Task A: {}\n", word)).unwrap();
+                DATAPIPE.write_all(s.as_bytes()).await;
+                Timer::after_ticks(1000).await;
             }
         },
         "Task A",
     );
 
     Cpu0::spawn(
-        async {
+        async move {
+            let random_words = ["breeze", "galore", "zenith", "echo", "luminous"];
             loop {
-                print!("Task B: {}\n", Cpu0::now());
-                Timer::after_ticks(3).await;
-
-                print!("Task B: {}\n", Cpu0::now());
-                Timer::after_ticks(3).await;
+                let now = Cpu0::now();
+                let idx = now as usize % random_words.len();
+                let word = random_words[idx];
+                let mut buf = [0u8; PIPE_BUF_SIZE];
+                let s =
+                    format_no_std::show(&mut buf, format_args!("From Task B: {}\n", word)).unwrap();
+                DATAPIPE.write_all(s.as_bytes()).await;
+                Timer::after_ticks(200).await;
             }
         },
         "Task B",
+    );
+
+    Cpu0::spawn(
+        async move {
+            loop {
+                let mut buf = [0u8; PIPE_BUF_SIZE];
+                DATAPIPE.read(&mut buf).await;
+                let s = core::str::from_utf8(&buf).unwrap();
+                print!("{}", s);
+            }
+        },
+        "Task C",
+    );
+
+    Cpu0::spawn(
+        async move {
+            loop {
+                led1.set_high();
+                Timer::after_ticks(50).await;
+                led1.set_low();
+                Timer::after_ticks(50).await;
+            }
+        },
+        "Task D",
+    );
+
+    Cpu0::spawn(
+        async move {
+            loop {
+                led2.set_high();
+                Timer::after_ticks(150).await;
+                led2.set_low();
+                Timer::after_ticks(150).await;
+            }
+        },
+        "Task E",
     );
 
     Cpu0::start_executor();
@@ -100,6 +158,7 @@ fn post_init_fn() {
 #[panic_handler]
 fn panic(panic: &core::panic::PanicInfo<'_>) -> ! {
     defmt::error!("Panic! {}", defmt::Display2Format(panic));
+    print!("Panic! {}", panic);
     #[allow(clippy::empty_loop)]
     loop {}
 }

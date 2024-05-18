@@ -1,4 +1,5 @@
 use core::{
+    cell::{Cell, UnsafeCell},
     future::Future,
     pin::Pin,
     task::{self, Context, RawWaker, Waker},
@@ -8,9 +9,8 @@ use heapless::{Deque, Vec};
 
 use crate::{
     cpu::{alarm::AlarmHandle, cpu0::Cpu0, Cpu},
-    executor::waker,
-    mutex::blocking::{CriticalSectionRawMutex, Mutex},
     print,
+    sync::blocking_mutex::{CriticalSectionRawMutex, Mutex},
     time::timer_queue::{TimerQueue, TimerQueueItem},
 };
 
@@ -24,6 +24,7 @@ pub struct Executor {
     run_queue: Mutex<CriticalSectionRawMutex, Deque<&'static mut TaskHeader, MAX_TASKS>>,
     timer_queue: Mutex<CriticalSectionRawMutex, TimerQueue>,
     alarm_handle: Option<AlarmHandle>,
+    next_alarm_at: UnsafeCell<Option<u64>>,
 }
 
 impl Executor {
@@ -32,6 +33,7 @@ impl Executor {
             run_queue: Mutex::new(Deque::new()),
             timer_queue: Mutex::new(TimerQueue::new()),
             alarm_handle,
+            next_alarm_at: UnsafeCell::new(None),
         }
     }
 
@@ -41,28 +43,10 @@ impl Executor {
             .lock_mut(|x| x.push_front(TaskHeader::new(f, self, name)))
             .is_err()
         {
-            // OOM
-            crate::utils::abort();
+            panic!("Executor::spawn: FAILED\n");
+            // crate::utils::abort();
         }
     }
-
-    // pub unsafe fn enqueue_timer(&self, expires_at: u64, waker: Waker) -> Option<()> {
-    //     let name = unsafe { waker::task_from_waker(&waker).as_static_mut_header() }.name;
-    //     print!(
-    //         "[debug]: Executor timer enqueued: task={}, expires_at={}, try to inset into the timer queue of {}\n",
-    //         name, expires_at, Cpu0::now()
-    //     );
-    //     let next_tick = self.timer_queue.lock_mut(|x| {
-    //         // print!(
-    //         //     "[debug]: [debug]: Executor timer enqueued: task={}, expires_at={}, locked the timer queue at {}\n",
-    //         //     name, expires_at, Cpu0::now()
-    //         // );
-    //         x.enqueue(TimerQueueItem { expires_at, waker });
-    //         x.next_expiration()
-    //     })?;
-
-    //     self.set_alarm(next_tick)
-    // }
 
     pub fn start(&self) -> ! {
         self.register_alarm_callback();
@@ -120,9 +104,25 @@ impl Executor {
 
     fn renew_alarm(&self) {
         if let Some(next_tick) = self.timer_queue.lock(|x| x.next_expiration()) {
-            // print!("[debug]: Executor::renew_alarm: set to tick at {}\n", next_tick);
+            // print!(
+            //     "[debug]: Executor::renew_alarm: set to tick at {}\n",
+            //     next_tick
+            // );
             self.set_alarm(next_tick);
         }
+    }
+
+    // public interface
+    pub unsafe fn enqueue_and_pend(&self, task: &'static mut TaskHeader) -> Option<()> {
+        // SAFETY: make sure that there is one instance of a TaskHeader reference
+        // in the run_queue and the timer_queue
+        let x = self.run_queue.lock_mut(|x| x.push_back(task)).ok();
+        Cpu0::signal_event_local();
+        x
+    }
+
+    pub unsafe fn enqueue_no_pend(&self, task: &'static mut TaskHeader) -> Option<()> {
+        self.run_queue.lock_mut(|x| x.push_back(task)).ok()
     }
 
     // task execution ------------------------------------------------------------------------------------------------------
@@ -131,7 +131,7 @@ impl Executor {
         // set to suspended because it has been polled by `pop`-ing it out of the `ready_queue`
         while let Some(task_ref) = self.run_queue.lock_mut(|x| x.pop_front()) {
             task_ref.expires_at = None; // clear its expiration bit because it has already been woken
-            
+
             // create waker and context for this task on the fly
             // to pass it to the `Future::poll` chain
             let waker = unsafe {
@@ -170,6 +170,18 @@ impl Executor {
 
     /// Set the next tick when the alarm will kick off
     pub fn set_alarm(&self, expires_at: u64) -> Option<()> {
+        // match unsafe { &mut *self.next_alarm_at.get() } {
+        //     Some(next) if *next <= expires_at => None,
+        //     next => {
+        //         // next > expires_at
+        //         // has newer timer, update the alarm
+        //         // though it does not remove the originally registered alarm and may have duplicate
+        //         // ones as it may get set again, it reduces the duplicatoin
+        //         // TODO: find an alternative solution or just leave it?
+        //         *next = Some(expires_at);
+        //         Cpu0::set_alarm(self.alarm_handle.unwrap(), expires_at) // set the next tick
+        //     }
+        // }
         Cpu0::set_alarm(self.alarm_handle.unwrap(), expires_at) // set the next tick
     }
 

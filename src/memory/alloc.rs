@@ -30,7 +30,7 @@ impl Alloc {
             unsafe { &mut *(self.start.add(new_pos) as *mut MaybeUninit<T>) }
         } else {
             // OOM
-            crate::utils::abort();
+            panic!("Alloc: allocation failed\n");
         }
     }
 
