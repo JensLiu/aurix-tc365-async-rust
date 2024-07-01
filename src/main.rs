@@ -3,123 +3,70 @@
 
 use bw_r_drivers_tc37x as drivers;
 use core::arch::asm;
+use core::sync::atomic::{compiler_fence, AtomicU32, Ordering};
 use core::time::Duration;
-use cpu::cpu0::Cpu0;
+use cpu::cpu0::Kernel;
+use cpu::Cpu;
 use critical_section::RawRestoreState;
-use drivers::gpio::GpioExt;
+use drivers::gpio::{gpio00, GpioExt, Output, Pin};
+use drivers::interrupt::SoftwareInterruptNode;
 use drivers::scu::wdt::{disable_cpu_watchdog, disable_safety_watchdog};
 use drivers::scu::wdt_call::call_without_endinit;
 use drivers::uart::init_uart_io;
 use drivers::uart::print;
 use drivers::{pac, ssw};
 use sync::blocking_mutex::CriticalSectionRawMutex;
-use sync::mutex::Mutex;
 use sync::pipe::Pipe;
+use sync::pubsub::PubSubChannel;
+use sync::select::select;
+use sync::signal::Signal;
 
-use crate::cpu::Cpu;
+extern crate alloc;
+
 use crate::time::timer_fut::Timer;
 
 mod cpu;
 mod executor;
 mod memory;
 mod runtime;
+mod srp_mutex;
 mod sync;
 mod time;
 mod utils;
+mod petri_net;
 
-const PIPE_BUF_SIZE: usize = 32;
-static DATAPIPE: Pipe<CriticalSectionRawMutex, PIPE_BUF_SIZE> = Pipe::new();
+install_interrupt_executor_handler!(2);
+install_interrupt_executor_handler!(3);
+install_interrupt_executor_handler!(4);
 
 #[export_name = "main"]
 fn main() -> ! {
     init_uart_io();
-
-    Cpu0::init();
-
-    let gpio00 = pac::P00.split();
-    let mut led1 = gpio00.p00_5.into_push_pull_output();
-    let mut led2 = gpio00.p00_6.into_push_pull_output();
-
-    Cpu0::spawn(
-        async {
-            let random_words = ["apple", "mountain", "river", "elephant", "galaxy"];
-            loop {
-                let now = Cpu0::now();
-                let idx = now as usize % random_words.len();
-                let word = random_words[idx];
-                let mut buf = [0u8; PIPE_BUF_SIZE];
-                let s =
-                    format_no_std::show(&mut buf, format_args!("From Task A: {}\n", word)).unwrap();
-                DATAPIPE.write_all(s.as_bytes()).await;
-                Timer::after_ticks(1000).await;
-            }
-        },
-        "Task A",
-    );
-
-    Cpu0::spawn(
-        async move {
-            let random_words = ["breeze", "galore", "zenith", "echo", "luminous"];
-            loop {
-                let now = Cpu0::now();
-                let idx = now as usize % random_words.len();
-                let word = random_words[idx];
-                let mut buf = [0u8; PIPE_BUF_SIZE];
-                let s =
-                    format_no_std::show(&mut buf, format_args!("From Task B: {}\n", word)).unwrap();
-                DATAPIPE.write_all(s.as_bytes()).await;
-                Timer::after_ticks(200).await;
-            }
-        },
-        "Task B",
-    );
-
-    Cpu0::spawn(
-        async move {
-            loop {
-                let mut buf = [0u8; PIPE_BUF_SIZE];
-                DATAPIPE.read(&mut buf).await;
-                let s = core::str::from_utf8(&buf).unwrap();
-                print!("{}", s);
-            }
-        },
-        "Task C",
-    );
-
-    Cpu0::spawn(
-        async move {
-            loop {
-                led1.set_high();
-                Timer::after_ticks(50).await;
-                led1.set_low();
-                Timer::after_ticks(50).await;
-            }
-        },
-        "Task D",
-    );
-
-    Cpu0::spawn(
-        async move {
-            loop {
-                led2.set_high();
-                Timer::after_ticks(150).await;
-                led2.set_low();
-                Timer::after_ticks(150).await;
-            }
-        },
-        "Task E",
-    );
-
-    Cpu0::start_executor();
+    print!("KERNEL: UART driver initialised\n");
+    Kernel::init();
+    loop {}
 }
+
+// -------------------------------------------------------------------------------------
+
+// #[no_mangle]
+// extern "C" fn __INTERRUPT_HANDLER_2() {
+//     let handle = unsafe { crate::cpu::executor_list::ExecutorHandle::from_prio(2) };
+//     let executor = Cpu0::get_executor(handle);
+//     print!(".");
+//     executor.on_interrupt();
+// }
+
 
 /// Wait for a number of cycles roughly calculated from a duration.
 #[inline(always)]
+#[allow(unused)]
 fn wait_nop(period: Duration) {
     let ns: u32 = period.as_nanos() as u32;
     let n_cycles = ns / 920;
     for _ in 0..n_cycles {
         // SAFETY: nop is always safe
+        // compiler_fence(core::sync::atomic::Ordering::AcqRel);
         unsafe { core::arch::asm!("nop") };
     }
 }
@@ -167,14 +114,27 @@ struct Section;
 
 critical_section::set_impl!(Section);
 
+// workaround since reading ICR.IE does not work heres...
+// maybe because of privileged access?
+static NESTED_INTERRUPT_NR: AtomicU32 = AtomicU32::new(0);
+
 unsafe impl critical_section::Impl for Section {
     unsafe fn acquire() -> RawRestoreState {
-        unsafe { asm!("disable") };
-        true
+        // let cpu0 = bw_r_drivers_tc37x::pac::CPU0;
+        // let was_enabled = cpu0.icr().read().ie().get();
+        // print!("[");
+        unsafe {
+            asm!("disable");
+        }
+        // true
+        NESTED_INTERRUPT_NR.fetch_add(1, Ordering::Acquire) == 0
     }
 
-    unsafe fn release(token: RawRestoreState) {
-        if token {
+    unsafe fn release(was_active: RawRestoreState) {
+        // print!("]");
+        // if was_active {
+        if NESTED_INTERRUPT_NR.fetch_sub(1, Ordering::Release) <= 1 {
+            // print!("!");
             unsafe { asm!("enable") }
         }
     }

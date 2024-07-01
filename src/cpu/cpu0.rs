@@ -1,19 +1,28 @@
 use core::{
     arch::asm,
+    borrow::Borrow,
     cell::{Cell, UnsafeCell},
     mem::MaybeUninit,
     sync::atomic::{self, AtomicBool, AtomicU32, Ordering},
 };
 
+use bw_r_drivers_tc37x::{gpio::GpioExt, interrupt::SoftwareInterruptNode, pac};
+use embedded_alloc::Heap;
+use heapless::{LinearMap, Vec};
+
 use crate::{
-    executor::{self, executor_impl::Executor, yields::Yielder},
-    memory::alloc::{Alloc, ALLOC},
+    executor::{
+        self, interrupt_executor::InterruptExecutor, thread_executor::ThreadExecutor,
+        yields::Yielder,
+    },
+    memory::bump::{BumpAllocator, ALLOC},
     print,
     sync::blocking_mutex::{CriticalSectionRawMutex, Mutex},
 };
 
 use super::{
     alarm::{AlarmHandle, AlarmQueue},
+    executor_list::{ExecutorHandle, ExecutorList},
     Cpu,
 };
 
@@ -28,9 +37,13 @@ static TICKS: AtomicU32 = AtomicU32::new(0);
 /// memory size for the bump allocator used to allocate Futures
 const MEMORY_SIZE: usize = 1024 * 10;
 
-pub struct Cpu0 {}
+// heap allocator
+#[global_allocator]
+static HEAP: embedded_alloc::Heap = embedded_alloc::Heap::empty();
 
-impl Cpu for Cpu0 {
+pub struct Kernel {}
+
+impl Cpu for Kernel {
     const CPU_NR: u8 = 0;
 
     fn signal_event_local() {
@@ -57,16 +70,17 @@ impl Cpu for Cpu0 {
             // and interrupts are disabled, so no preemption
             &mut *ALARM_QUEUE.as_mut_ptr()
         };
-        r.call_all_expired(now);
+        let n = r.call_all_expired(now);
     }
 
     fn spawn(fut: impl core::future::Future<Output = ()> + 'static, name: &'static str) {
-        unsafe { Self::executor_ref() }.spawn(fut, name);
+        print!("KERNEL: Spawned {} at priority 0\n", name);
+        unsafe { Self::thread_executor_ref() }.spawn(fut, name);
     }
 
-    fn start_executor() -> ! {
-        print!("CORE0: START EXECUTOR\n");
-        unsafe { Self::executor_ref() }.start();
+    fn start_thread_executor() -> ! {
+        print!("KERNEL: Start thread executor at prio 0\n");
+        unsafe { Self::thread_executor_ref() }.start();
     }
 
     fn yields() -> executor::yields::Yielder<Self>
@@ -91,50 +105,62 @@ impl Cpu for Cpu0 {
     }
 
     fn init() {
-        unsafe {
-            let p = ALARM_QUEUE.as_mut_ptr();
-            *p = AlarmQueue::new();
+        {
+            unsafe {
+                let p = ALARM_QUEUE.as_mut_ptr();
+                *p = AlarmQueue::new();
+            }
+            print!("KERNEL: Alarm queue initialised\n");
         }
-        print!("CPU0: Alarm queue initialised\n");
 
-        bw_r_drivers_tc37x::timer::init_gpt12_timer();
-        print!("CPU0: Timer initialised\n");
+        // let list: ExecutorList<CriticalSectionRawMutex, N_EXECUTORS> = ExecutorList::new();
+        // unsafe {
+        //     print!("Map created\n");
+        //     let p: *mut ExecutorList<CriticalSectionRawMutex, N_EXECUTORS> =
+        //         INTERRUPT_EXECUTORS.as_mut_ptr();
+        //     // *p = list;
+        // }
+        // print!("KERNEL: Executor list initialised\n");
 
-        unsafe {
-            asm!("enable");
+        {
+            bw_r_drivers_tc37x::timer::init_gpt12_timer(6);
+            print!("KERNEL: System Timer initialised\n");
         }
-        print!("CPU0: Interrupts enabled\n");
-
-        // initialise the bump allocator
-        static mut MEMORY: [u8; MEMORY_SIZE] = [0; MEMORY_SIZE];
-        unsafe {
-            let allocp = ALLOC.get() as *mut Alloc;
-            allocp.write(Alloc::new(&mut MEMORY));
+        {
+            unsafe {
+                asm!("enable");
+            }
+            print!("KERNEL: Interrupts enabled\n");
         }
-        // force the `allocp` write to complete before returning from this function
-        atomic::compiler_fence(Ordering::Release);
-        print!("CPU0: Bump allocator initialised\n");
 
-        print!("CORE0 INITIALISED\n");
+        {
+            // initialise the bump allocator
+            static mut MEMORY: [u8; MEMORY_SIZE] = [0; MEMORY_SIZE];
+            unsafe {
+                let allocp = ALLOC.get() as *mut BumpAllocator;
+                allocp.write(BumpAllocator::new(&mut MEMORY));
+            }
+            // force the `allocp` write to complete before returning from this function
+            atomic::compiler_fence(Ordering::Release);
+            print!("KERNEL: Bump allocator initialised\n");
+        }
+
+        {
+            const HEAP_SIZE: usize = 1024 * 1024;
+            static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+            unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
+            print!("KERNEL: Global allocator initialised\n");
+        }
+
+        // print!("KERNEL: Initialised\n");
     }
 
-    unsafe fn executor_ref() -> &'static mut Executor {
-        static INIT: AtomicBool = AtomicBool::new(false); // initialised or not
-        static mut EXECUTOR: UnsafeCell<MaybeUninit<Executor>> =
-            UnsafeCell::new(MaybeUninit::uninit());
-
-        if INIT.load(Ordering::Relaxed) {
-            &mut *(EXECUTOR.get() as *mut Executor)
-        } else {
-            let executorp = EXECUTOR.get() as *mut Executor;
-            executorp.write(Executor::new(Some(Self::allocate_alarm().unwrap())));
-            INIT.store(true, Ordering::Relaxed);
-            &mut *executorp
-        }
+    unsafe fn thread_executor_ref() -> &'static ThreadExecutor {
+        Self::get_executors().thread_executor()
     }
 }
 
-impl Cpu0 {
+impl Kernel {
     fn modify_alarm_queue<R>(
         f: impl FnOnce(&mut AlarmQueue<N_ALARM_HANDLES, N_ALARM_ITEMS>) -> R,
     ) -> R {
@@ -145,20 +171,105 @@ impl Cpu0 {
         };
         f(r)
     }
+
+    fn get_executors() -> &'static ExecutorList<CriticalSectionRawMutex, N_EXECUTORS> {
+        unsafe { INTERRUPT_EXECUTORS.borrow() }
+    }
+
+    pub fn allocate_interrupt_executor(node: SoftwareInterruptNode) -> ExecutorHandle {
+        // print!("allocate_interrupt_executor called with {:#?}\n", node);
+        let executors = Self::get_executors();
+        // print!("Got executor list {:#?}", executors);
+        match executors.allocate(node) {
+            Some(x) => x,
+            None => panic!("Cpu::allocate_interrupt_executor: executor list unable to allocate\n"),
+        }
+    }
+
+    pub fn spawn_executor(
+        handle: ExecutorHandle,
+        fut: impl core::future::Future<Output = ()> + 'static,
+        name: &'static str,
+    ) {
+        print!(
+            "KERNEL: Spawned {} at priority {}\n",
+            name,
+            handle.get_prio()
+        );
+        Self::get_executors().spawn(handle, fut, name)
+    }
+
+    /// This is called inside the [`install_interrupt_executor_handler`] macro
+    #[allow(unused)]
+    pub fn get_executor(handle: ExecutorHandle) -> &'static InterruptExecutor {
+        let x = Self::get_executors().get(handle);
+        // hacked: make static lifetime
+        unsafe {
+            // safety: here, INTERRUPT_EXECUTORS is a static variable, it uses a static hash map to store the
+            // data
+            &*x
+        }
+    }
+
+    pub fn start_interrupt_executor(handle: ExecutorHandle) {
+        print!(
+            "KERNEL: Start interrupt executor at prio {:?}\n",
+            handle.get_prio()
+        );
+        Self::get_executors().start_interrupt_executor(handle);
+    }
+
+    pub fn current_tick() -> u32 {
+        TICKS.load(Ordering::Relaxed)
+    }
 }
 
 // alarm queue
-const N_ALARM_HANDLES: usize = 1;
+const N_ALARM_HANDLES: usize = 8;
 const N_ALARM_ITEMS: usize = 64;
 
 static mut ALARM_QUEUE: MaybeUninit<AlarmQueue<N_ALARM_HANDLES, N_ALARM_ITEMS>> =
     MaybeUninit::uninit();
 
-// initialised flag
-// static mut INITIALISED: AtomicBool = AtomicBool::new(false);
+// interrupt executors
+const N_EXECUTORS: usize = 4;
+static mut INTERRUPT_EXECUTORS: ExecutorList<CriticalSectionRawMutex, N_EXECUTORS> =
+    ExecutorList::new();
 
 // timer interrupt
 #[no_mangle]
 extern "C" fn __INTERRUPT_HANDLER_6() {
-    Cpu0::on_timer_interrupt();
+    // let gpio00 = pac::P00.split();
+    // let mut p00 = gpio00.p00_0.into_push_pull_output();
+    // p00.set_high();
+    Kernel::on_timer_interrupt();
+    // p00.set_low();
 }
+
+#[macro_export]
+macro_rules! install_interrupt_executor_handler {
+    ($prio:expr) => {
+        paste::paste! {
+            #[no_mangle]
+            extern "C" fn [<__INTERRUPT_HANDLER_$prio>]() {
+                let handle = unsafe { crate::cpu::executor_list::ExecutorHandle::from_prio($prio) };
+                let executor = Kernel::get_executor(handle);
+                executor.on_interrupt();
+            }
+        }
+    };
+}
+
+// #[no_mangle]
+// extern "C" fn __INTERRUPT_HANDLER_2() {
+//     let handle = unsafe { ExecutorHandle::from_prio(2) };
+//     let executor = Kernel::get_executor(handle);
+//     executor.on_interrupt();
+// }
+
+// #[no_mangle]
+// extern "C" fn __INTERRUPT_HANDLER_3() {
+//     let handle = unsafe { ExecutorHandle::from_prio(3) };
+//     let executor = Kernel::get_executor(handle);
+//     executor.on_interrupt();
+// }

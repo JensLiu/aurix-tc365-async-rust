@@ -3,7 +3,9 @@ use core::{
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::executor::task::{TaskHeader, TaskRef};
+use bw_r_drivers_tc37x::{gpio::GpioExt, pac};
+
+use crate::{executor::task::{TaskHeader, TaskRef}, print};
 
 // waker context, p is a raw pointer to an atomic bool variable
 pub(crate) static VTABLE: RawWakerVTable = {
@@ -16,7 +18,13 @@ pub(crate) static VTABLE: RawWakerVTable = {
     }
 
     unsafe fn wake_by_ref(p: *const ()) {
+        // let gpio00 = pac::P00.split();
+        // let mut pin2 = gpio00.p00_2.into_push_pull_output();
+        // pin2.set_high();
+        
+        // ~100ns
         let task = TaskRef::from_ptr(p as *const TaskHeader).as_static_mut_header();
+        // print!("Waker::wake_by_ref: wake task {}\n", task.name);
         task.executor.enqueue_and_pend(task);
     }
 

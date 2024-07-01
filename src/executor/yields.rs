@@ -1,6 +1,8 @@
-use core::{future::Future, marker::PhantomData, pin, task::Poll};
+use core::{future::Future, marker::PhantomData, task::Poll};
 
-use crate::cpu::Cpu;
+use bw_r_drivers_tc37x::{gpio::GpioExt, pac};
+
+use crate::{cpu::Cpu, print};
 
 pub struct Yielder<A> {
     yielded: bool,
@@ -23,8 +25,13 @@ impl<A: Cpu + core::marker::Unpin> Future for Yielder<A> {
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
+        // let gpio00 = pac::P00.split();
+        // let mut pin2 = gpio00.p00_2.into_push_pull_output();
+        // pin2.set_high();
+
         if self.yielded {
             // already yielded once, now exit
+            // pin2.set_low();
             Poll::Ready(())
         } else {
             // yield once

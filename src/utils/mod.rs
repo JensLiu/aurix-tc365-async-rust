@@ -1,5 +1,6 @@
 use core::fmt::Write;
 
+#[allow(unused)]
 pub fn abort() -> ! {
     bw_r_drivers_tc37x::uart::print("aborted");
     loop {}

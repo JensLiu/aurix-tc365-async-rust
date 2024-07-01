@@ -6,6 +6,8 @@ use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
+use crate::print;
+
 use super::{PubSubBehavior, PubSubChannel, WaitResult};
 use super::super::blocking_mutex::RawMutex;
 

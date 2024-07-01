@@ -3,6 +3,8 @@ use core::cell::Cell;
 use core::future::{poll_fn, Future};
 use core::task::{Context, Poll, Waker};
 
+use crate::print;
+
 use super::blocking_mutex::RawMutex;
 use super::blocking_mutex::Mutex;
 
@@ -74,6 +76,7 @@ where
         self.state.lock(|cell| {
             let state = cell.replace(State::Signaled(val));
             if let State::Waiting(waker) = state {
+                // print!("Signal::signal: waker waker woken\n");
                 waker.wake();
             }
         })

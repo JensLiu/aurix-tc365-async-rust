@@ -2,6 +2,8 @@
 
 use core::cell::UnsafeCell;
 
+use crate::print;
+
 /// "raw" in a way that it does not contain the protected data
 /// It is just implements the mutex mechanism
 pub unsafe trait RawMutex {
@@ -12,6 +14,7 @@ pub unsafe trait RawMutex {
     fn lock<R>(&self, f: impl FnOnce() -> R) -> R;
 }
 
+#[derive(Debug)]
 pub struct CriticalSectionRawMutex {}
 
 unsafe impl Send for CriticalSectionRawMutex {}
@@ -28,10 +31,13 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
     const INIT: Self = Self::new();
 
     fn lock<R>(&self, f: impl FnOnce() -> R) -> R {
-        critical_section::with(|_| f())
+        critical_section::with(|_| {
+            f()
+        })
     }
 }
 
+#[derive(Debug)]
 pub struct Mutex<R, T: ?Sized> {
     raw: R,
     data: UnsafeCell<T>,
@@ -58,9 +64,19 @@ impl<R: RawMutex, T> Mutex<R, T> {
     }
 
     pub fn lock_mut<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
-        let ptr = self.data.get() as *mut T;
-        let inner = unsafe { &mut *ptr };
-        f(inner)
+        self.raw.lock(|| {
+            let ptr = self.data.get() as *mut T;
+            let inner = unsafe { &mut *ptr };
+            f(inner)
+        })
+    }
+
+    pub unsafe fn dirty_read<U>(&self, f: impl FnOnce(&T) -> U) -> U {
+        self.raw.lock(|| {
+            let ptr = self.data.get() as *const T;
+            let inner = unsafe { &*ptr };
+            f(inner)
+        })
     }
 }
 

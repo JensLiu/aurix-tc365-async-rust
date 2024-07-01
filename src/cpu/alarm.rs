@@ -44,7 +44,7 @@ impl<const H: usize, const A: usize> AlarmQueue<H, A> {
 
     pub fn register_callback(&mut self, handle: AlarmHandle, f: fn(*mut ()), ctx: *mut ()) {
         let idx = handle.id as usize;
-        let x = self.callbacks.lock_mut(|x| {
+        self.callbacks.lock_mut(|x| {
             let ptr = x.get_mut(idx).unwrap();
             *ptr = Some((f, ctx));
         });
@@ -79,14 +79,18 @@ impl<const H: usize, const A: usize> AlarmQueue<H, A> {
         })
     }
     
-    pub fn call_all_expired(&self, now: u64) {
+    pub fn call_all_expired(&self, now: u64) -> usize {
+        let mut count: usize = 0;
         // this is a min heap
         while let Some(item) = self.get_one_expired_item(now) {
             if item.expires_at <= now {
+                // print!("AlarmQueue::call_all_expired id={}\n", item.handle.id);
                 self.call(item.handle);
+                count += 1;
             } else {
                 break;
             }
         }
+        count
     }
 }

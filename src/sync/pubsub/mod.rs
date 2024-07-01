@@ -8,6 +8,8 @@ use core::task::{Context, Poll};
 
 use heapless::Deque;
 
+use crate::print;
+
 use self::publisher::{ImmediatePub, Pub};
 use self::subscriber::Sub;
 use super::blocking_mutex::RawMutex;
@@ -166,9 +168,10 @@ impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usi
     for PubSubChannel<M, T, CAP, SUBS, PUBS>
 {
     fn get_message_with_context(&self, next_message_id: &mut u64, cx: Option<&mut Context<'_>>) -> Poll<WaitResult<T>> {
+        // print!("PubSubBehavior::get_message_with_context\n");
         self.inner.lock(|s| {
             let mut s = s.borrow_mut();
-
+            // print!("PubSubBehavior::get_message_with_context: state mut borrowed\n");
             // Check if we can read a message
             match s.get_message(*next_message_id) {
                 // Yes, so we are done polling
@@ -277,6 +280,7 @@ impl<T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize> PubSubSta
     fn try_publish(&mut self, message: T) -> Result<(), T> {
         if self.subscriber_count == 0 {
             // We don't need to publish anything because there is no one to receive it
+            print!("PubSubState::try_publish: no subscriber yet, skip\n");
             return Ok(());
         }
 

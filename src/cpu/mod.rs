@@ -1,10 +1,11 @@
 pub mod alarm;
 pub mod cpu0;
+pub mod executor_list;
 
 use core::future::Future;
 
 use self::alarm::AlarmHandle;
-use crate::executor::{executor_impl::Executor, yields::Yielder};
+use crate::executor::{thread_executor::ThreadExecutor, yields::Yielder};
 
 pub trait Cpu {
     const CPU_NR: u8;
@@ -25,13 +26,13 @@ pub trait Cpu {
 
     fn on_timer_interrupt();
 
-    unsafe fn executor_ref() -> &'static mut Executor
+    unsafe fn thread_executor_ref() -> &'static ThreadExecutor
     where
         Self: Sized;
 
     fn spawn(fut: impl Future<Output = ()> + 'static, name: &'static str);
 
-    fn start_executor() -> !;
+    fn start_thread_executor() -> !;
 
     fn yields() -> Yielder<Self>
     where

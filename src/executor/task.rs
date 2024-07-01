@@ -1,8 +1,8 @@
 use core::{future::Future, ptr::NonNull};
 
-use crate::memory::alloc::{Alloc, ALLOC};
+use crate::memory::bump::{BumpAllocator, ALLOC};
 
-use super::executor_impl::Executor;
+use super::base_executor::BaseExecutor;
 
 #[derive(Debug)]
 pub struct TaskRef {
@@ -28,14 +28,15 @@ impl From<&'static mut TaskHeader> for TaskRef {
 }
 
 pub struct TaskHeader {
+    #[allow(unused)]
     pub(crate) name: &'static str,
     pub(crate) fut_ref: &'static mut dyn Future<Output = ()>,
-    pub(crate) executor: &'static Executor,
+    pub(crate) executor: &'static BaseExecutor,
     pub(crate) expires_at: Option<u64>,
 }
 
 impl TaskHeader {
-    pub fn new(fut: impl Future + 'static, executor: &'static Executor, name: &'static str) -> &'static mut Self {
+    pub fn new(fut: impl Future + 'static, executor: &'static BaseExecutor, name: &'static str) -> &'static mut Self {
         let fut_ref = Self::allocate_static_future(fut);
         Self::use_alloc(|| Self {
             name,
@@ -57,7 +58,7 @@ impl TaskHeader {
     fn use_alloc<T>(f: impl FnOnce() -> T) -> &'static mut T {
         unsafe {
             // ALLOC should have already been initialised at this point
-            let alloc = ALLOC.get() as *mut Alloc;
+            let alloc = ALLOC.get() as *mut BumpAllocator;
             (*alloc).alloc_init(f())
         }
     }

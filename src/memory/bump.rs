@@ -6,13 +6,13 @@
 
 use core::{cell::UnsafeCell, mem::{self, MaybeUninit}};
 
-pub struct Alloc {
+pub struct BumpAllocator {
     len: usize,
     pos: usize,
     start: *mut u8,
 }
 
-impl Alloc {
+impl BumpAllocator {
     pub(crate) fn new(memory: &'static mut [u8]) -> Self {
         Self {
             len: memory.len(),
@@ -29,7 +29,6 @@ impl Alloc {
             self.pos = new_pos + size;
             unsafe { &mut *(self.start.add(new_pos) as *mut MaybeUninit<T>) }
         } else {
-            // OOM
             panic!("Alloc: allocation failed\n");
         }
     }
@@ -54,4 +53,4 @@ fn round_up(n: usize, m: usize) -> usize {
     }
 }
 
-pub(crate) static mut ALLOC: UnsafeCell<MaybeUninit<Alloc>> = UnsafeCell::new(MaybeUninit::uninit());
+pub(crate) static mut ALLOC: UnsafeCell<MaybeUninit<BumpAllocator>> = UnsafeCell::new(MaybeUninit::uninit());

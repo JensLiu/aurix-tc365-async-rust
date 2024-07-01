@@ -1,7 +1,7 @@
 use core::{future::Future, task::Poll};
 
 use crate::{
-    cpu::{cpu0::Cpu0, Cpu},
+    cpu::{cpu0::Kernel, Cpu},
     executor::waker,
 };
 
@@ -12,7 +12,7 @@ pub struct Timer {
 impl Timer {
     pub fn after_ticks(ticks: u64) -> Self {
         Self {
-            expires_at: Cpu0::now() + ticks,
+            expires_at: Kernel::now() + ticks,
         }
     }
 }
@@ -24,7 +24,7 @@ impl Future for Timer {
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
-        if self.expires_at <= Cpu0::now() {
+        if self.expires_at <= Kernel::now() {
             Poll::Ready(())
         } else {
             // schedule wake up
